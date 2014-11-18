@@ -1,428 +1,424 @@
 <?xml version="1.0" encoding="utf-8"?>
-<s:Application xmlns:fx="http://ns.adobe.com/mxml/2009" 
-			   xmlns:s="library://ns.adobe.com/flex/spark" resize="scaleVideoDisplay()" 
-			   xmlns:mx="library://ns.adobe.com/flex/mx" 
-			   applicationComplete="init()">
-	<fx:Declarations>
-		<!-- Place non-visual elements (e.g., services, value objects) here -->
-	</fx:Declarations>
-	
-		<fx:Style>
-		@namespace s "library://ns.adobe.com/flex/spark";
-		@namespace mx "library://ns.adobe.com/flex/mx";
-		
-		.publisherContainer {
-			borderColor:#ffffff;
-			borderStyle:inset;
-			borderAlpha:1;
-		}
-	</fx:Style> 
-	<fx:Script>
-		<![CDATA[
-			import packages.*;
-			import flash.events.NetStatusEvent;
-			import flash.external.*;
-			import flash.media.Microphone;
-			import flash.media.SoundMixer;
-			import flash.system.Security;
-			import mx.controls.*;
-			import mx.core.FlexGlobals;
-			import mx.core.UIComponent;    
-			
-			private var GLOBAL_MODE:String = null;
-			private var GLOBAL_URL:String = null;
-			private var GLOBAL_USERID:String = null;
-			private var GLOBAL_SESSIONID:String = null;
-			private var GLOBAL_OPTIONS:Array = null;    
-			
-			private var fc:FmsConnection = null; // the fms connection object
-			private var streamPublisherContainer:VideoDisplay;          
-			private var streamViewerContainer:UIComponent;      
-			
-			private var videoObject:Video;
-			
-			// streams
-			private var streamPublisher:NetStream;
-			private var streamViewer:NetStream;
-			
-			// cam vars
-			private var userCamera:UCamera = null;      
-			
-			// sound vars
-			private var toggleSound:Boolean = false;
-			private var userMicrophone:Microphone = Microphone.getEnhancedMicrophone();
-			private var userSound:SoundTransform;
-			
-			// controls
-			private var toolbar:VideoControls = new VideoControls();
-			
-			// text container for debug console
-			private var debugConsole:Text = new Text();         
-			
-			public var rcResponder:Responder = new Responder(onResult, onFault); // remote call responder
-			
-			/**
-			 * Initialize application
-			 * 
-			 * @return void
-			 */         
-			private function init():void
-			{       
-				Security.allowDomain("*");
-				
-				// Instantiate a ContextMenuItem
-				var customItem1:ContextMenuItem = new ContextMenuItem("version: " + Settings.VERSION);
-				var customItem2:ContextMenuItem = new ContextMenuItem("compiled: " + Settings.COMPILED_AT ); 
-				contextMenu.customItems.push(customItem1, customItem2);
-				
-				// set external interface methods
-				if (ExternalInterface.available){                   
-					ExternalInterface.addCallback("connect", connect);
-					ExternalInterface.addCallback("disconnect", disconnect);
-					ExternalInterface.addCallback("isConnected", isConnected);
-					ExternalInterface.addCallback("toggleMute", toggleMute);
-				}
-				
-				if (FlexGlobals.topLevelApplication.parameters.callback)
-				{
-					Settings.JS_CALLBACK_METHOD = FlexGlobals.topLevelApplication.parameters.callback;
-					ExternalInterface.call(Settings.JS_CALLBACK_METHOD);                 
-				}
-				
-				if (FlexGlobals.topLevelApplication.parameters.log)
-				{
-					Settings.JS_LOG_METHOD = FlexGlobals.topLevelApplication.parameters.log;
-					ExternalInterface.call(Settings.JS_LOG_METHOD, "ready", "Loading Application ..");           
-				}	
-			}
-			
-			/**
-			 * Connect to the streaming server
-			 * 
-			 * @param String url the server host
-			 * @param String userId future stream identifier (publish or play)
-			 * @param String cSessionId client identifier
-			 * @param Array options some options
-			 * 
-			 * @return void
-			 */
-			public function connect(url:String, userId:String, sessionId:String, options:Array = null):void
-			{                   
-				GLOBAL_URL = url;
-				GLOBAL_SESSIONID = sessionId;
-				GLOBAL_USERID = userId;
-				GLOBAL_OPTIONS = options; // add the extra connection options
-				
-				fc = new FmsConnection(url, userId, sessionId, options);
-				
-				if (FlexGlobals.topLevelApplication.parameters.mode)
-					run(FlexGlobals.topLevelApplication.parameters.mode, '');
-				else
-					dispatchResponse("error", Settings.ERR_APPMODE_BLANK);
-			}
-			
-			private function reload():void
-			{
-				fc = new FmsConnection(GLOBAL_URL, GLOBAL_USERID, GLOBAL_SESSIONID, GLOBAL_OPTIONS);
-				if (GLOBAL_MODE == 'client'){
-					fc.nc.removeEventListener(NetStatusEvent.NET_STATUS, viewStream);
-					fc.nc.addEventListener(NetStatusEvent.NET_STATUS, viewStream);
-				}
-				if (GLOBAL_MODE == "performer")
-				{
-					fc.nc.removeEventListener(NetStatusEvent.NET_STATUS, publishStream);
-					fc.nc.addEventListener(NetStatusEvent.NET_STATUS, publishStream);                   
-				}
-				dispatchResponse("log", "[app reloaded]");
-			}
-			
-			/**
-			 * Disconnect from the streaming server
-			 * Return true if event raised is "NetConnection.Connect.Closed", false otherwise
-			 * check http://help.adobe.com/en_US/FlashPlatform/reference/actionscript/3/flash/events/NetStatusEvent.html#info
-			 * 
-			 * @return Boolean
-			 */         
-			public function disconnect():Boolean
-			{
-				fc.disconnect();
-				return !isConnected();
-			}
-			
-			/**
-			 * Check if application is still connected to the streaming server
-			 *  
-			 * @return Boolean
-			 */ 
-			public function isConnected():Boolean
-			{
-				if (fc.isConnected()){
-					dispatchResponse("log", Settings.ST_CONNECTION_IS_CONNECTED);
-					return true;
-				}
-				else {
-					dispatchResponse("log", Settings.ST_CONNECTION_IS_DISCONNECTED);
-					return false;
-				}                   
-			}   
-			
-			/**
-			 * Configure app to manage stream play/publish 
-			 * 
-			 * @param String mode configure app according to the given mode
-			 * @param String initiatorId who calls the configure
-			 * 
-			 * @return void
-			 */
-			private function run(mode:String, initiatorId:String):Boolean
-			{
-				GLOBAL_MODE = mode;
-				
-				switch (GLOBAL_MODE){
-					case 'performer':
-					{
-						streamPublisherContainer = new VideoDisplay;                						
-						streamPublisherContainer.right = 0;
-						streamPublisherContainer.bottom = 0;
-						streamPublisherContainer.percentWidth = 100;
-						streamPublisherContainer.percentHeight = 100;
-						streamPublisherContainer.minWidth = 1;
-						streamPublisherContainer.minHeight = 1;
-						streamPublisherContainer.alpha = 1;
-						
-						streamPublisherContainer.maintainAspectRatio = true;
-						streamPublisherContainer.volume = 1;
-						streamPublisherContainer.styleName = null;
-						
-						this.addElement(streamPublisherContainer); // put the video on stage
-						
-						userCamera = new UCamera; // initialize object
-						userCamera.open();
-						
-						streamPublisherContainer.attachCamera(userCamera.getStream());				
-						streamPublisherContainer.removeEventListener(MouseEvent.MOUSE_DOWN, mouseDownHandler);
-						streamPublisherContainer.removeEventListener(MouseEvent.MOUSE_UP, mouseUpHandler);						
-						fc.nc.addEventListener(NetStatusEvent.NET_STATUS, publishStream);   //Listener to see if connection is successful                       
-						
-						break;
-					}
-						
-					case 'client':
-					{
-						
-						streamViewerContainer = new UIComponent;
-						
-						streamViewerContainer.left = 0;
-						streamViewerContainer.top = 0;
-						streamViewerContainer.percentWidth = 100;
-						streamViewerContainer.percentHeight = 100;
-						
-						this.addElement(streamViewerContainer); // put the video on stage
-						fc.nc.addEventListener(NetStatusEvent.NET_STATUS, viewStream);  //Listener to see if connection is successful
-						
-						break;
-					} 
-						
-					default:
-					{
-						dispatchResponse("error", Settings.ERR_APPMODE_UNKNOWN);
-						return false;
-						break;
-					}                   
-				}
-				
-				// add controls
-				toolbar.show();
-				return true;
-			}
-			/**
-			 * Publish stream
-			 * 
-			 * @param NetStatusEvent event the event
-			 * @param Boolean forcePublish ignore the event and try to push stream to the streaming server
-			 * 
-			 * @return void
-			 */
-			private function publishStream(event:NetStatusEvent, ignoreEvent:Boolean = false):void
-			{
-				if (ignoreEvent || (event.info.code == "NetConnection.Connect.Success"))
-				{
-					var h264Settings:H264VideoStreamSettings;
-					h264Settings = new H264VideoStreamSettings();
-					h264Settings.setProfileLevel(H264Profile.BASELINE, H264Level.LEVEL_3_2);
-					h264Settings.setQuality(0, Settings.CAMERA_QUALITY);
-					h264Settings.setMode(userCamera.cameraWidth, userCamera.cameraHeight, userCamera.cameraFps);
-					
-					streamPublisher = new NetStream(fc.nc);  //Initializing NetStream               
-					streamPublisher.attachCamera(userCamera.getStream());
-					
-					try {
-						streamPublisher.attachAudio(getMicStream()); //Attaching Camera & Microphone
-					}
-					catch (err:Error) {
-						dispatchResponse("log", Settings.ERR_HARDWARE_MIC + err.message);
-					}                           
-					
-					streamPublisher.videoStreamSettings = h264Settings;                 
-					streamPublisher.publish("mp4:" + GLOBAL_USERID + ".mp4?sessionId=" + GLOBAL_SESSIONID + "&targetId=" + GLOBAL_USERID, "live"); //Publish stream"
-					
-					dispatchResponse("log", "Published @ " + "mp4:" + GLOBAL_USERID + ".mp4");      
-					
-				}
-				else {
-					if ((event.info.level == "status")) 
-						dispatchResponse("log", "PublishMethod." + event.info.code);
-					else
-						dispatchResponse("error", "PublishMethod." + event.info.code);
-					
-					if ((event.info.code == "NetConnection.Connect.Closed") || (event.info.code == "NetConnection.Connect.Failed"))
-						reload();                   
-				}
-			}       
-			
-			/**
-			 * Play stream
-			 * 
-			 * @param NetStatusEvent event the event
-			 * 
-			 * @return void
-			 */
-			private function viewStream(event:NetStatusEvent, ignoreEvent:Boolean = false):void
-			{
-				if (ignoreEvent || (event.info.code == "NetConnection.Connect.Success")){                   
-					streamViewer = new NetStream(fc.nc);  //Initializing NetStream
-					videoObject = new Video();
-					videoObject.attachNetStream(streamViewer);
-					initSound();
-					
-					streamViewer.play("mp4:" + GLOBAL_USERID + ".mp4?sessionId=" + GLOBAL_SESSIONID + "&targetId=" + GLOBAL_USERID);
-					
-					// scale to stream size
-					streamViewerContainer.width = videoObject.width = FlexGlobals.topLevelApplication.width;
-					streamViewerContainer.height = videoObject.height = FlexGlobals.topLevelApplication.height; 
-					
-					streamViewerContainer.addChild(videoObject);
-				}                   
-				
-				if (event) {   
-					if ((event.info.level == "status")) 
-						dispatchResponse("log", "ViewMethod." + event.info.code);
-					else
-						dispatchResponse("error", "ViewMethod." + event.info.code);
-					
-					if ((event.info.code == "NetConnection.Connect.Closed") || (event.info.code == "NetConnection.Connect.Failed"))
-						reload();
-				}               
-			}           
-			
-			/**
-			 * Makes application responsive
-			 * 
-			 * @return void
-			 */
-			public function scaleVideoDisplay(width:Number = 0, height:Number = 0):void
-			{
-				if (width>0 && height>0){
-					FlexGlobals.topLevelApplication.width = width;
-					FlexGlobals.topLevelApplication.height = height;                
-				}
-				
-				try
-				{
-					if (GLOBAL_MODE == "performer"){
-						streamPublisherContainer.width = FlexGlobals.topLevelApplication.width;
-						streamPublisherContainer.height = FlexGlobals.topLevelApplication.height;
-						
-					}
-					else {
-						streamViewerContainer.width = videoObject.width = FlexGlobals.topLevelApplication.width;
-						streamViewerContainer.height = videoObject.height = FlexGlobals.topLevelApplication.height;                                         
-					}           
-				} 
-				catch (err:Error) {
-					
-				}
-			}   
-			
-			/**
-			 * Init sound
-			 * 
-			 * @return void
-			 */         
-			private function initSound():void
-			{
-				//init soundTransform
-				userSound = new SoundTransform();
-				userSound.volume = 1; // goes from 0 to 1
-				flash.media.SoundMixer.soundTransform = userSound;              
-				
-				//by default sound is on
-				toggleSound = true;
-			}
-			
-			/**
-			 * Toggle sound on/off
-			 * 
-			 * @return Boolean true is sound is on, false if off 
-			 */
-			public function toggleMute():Boolean
-			{       
-				if (!toggleSound) {
-					userSound.volume = 1; // goes from 0 to 1
-					toggleSound = true;
-				}
-				else{
-					userSound.volume = 0; // goes from 0 to 1
-					toggleSound = false;
-				}       
-				
-				flash.media.SoundMixer.soundTransform = userSound;                      
-				return toggleSound;
-			}
-			
-			private function getMicStream():Microphone
-			{       
-				// using the default NellyMoser codec
-				userMicrophone.gain = 60; // default 50 
-				userMicrophone.rate = 44; // default 8 or any available > 8
-				
-				var options:MicrophoneEnhancedOptions = new MicrophoneEnhancedOptions();
-				options.mode = MicrophoneEnhancedMode.FULL_DUPLEX;
-				userMicrophone.enhancedOptions = options;               
-				userMicrophone.setLoopBack(false); // default true 
-				userMicrophone.setSilenceLevel(0); 
-				
-				return userMicrophone;      
-			}           
-			
-			/**
-			 * Log data to external js
-			 * 
-			 * @param String dispatchEvent is the event/category type of the message
-			 * @param String message
-			 * 
-			 * @return void
-			 */
-			private function dispatchResponse(dispatchEvent:String, message:String):void
-			{
-				ExternalInterface.call(Settings.JS_LOG_METHOD, dispatchEvent, message);
-			}               
-			
-			private function mouseDownHandler(event:MouseEvent):void {
-				var object:Object = event.target;
-				// we should limit dragging to the area inside the canvas
-				object.startDrag();
-			}
-			
-			private function mouseUpHandler(event:MouseEvent):void {
-				var object:Object = event.target;
-				object.stopDrag();
-			}   
-			
-			private function NetStreamEventHandler(event:NetStatusEvent):void{};                        
-			private function onResult(response:Object):void{};              
-			private function onFault(response:Object):void{};           
-			
-		]]>
-	</fx:Script>
+<s:Application xmlns:fx="http://ns.adobe.com/mxml/2009" xmlns:s="library://ns.adobe.com/flex/spark" resize="scaleVideoDisplay()" xmlns:mx="library://ns.adobe.com/flex/mx" applicationComplete="init()">
+    <fx:Declarations>
+        <!-- Place non-visual elements (e.g., services, value objects) here -->
+    </fx:Declarations>   
+        <fx:Style>
+        @namespace s "library://ns.adobe.com/flex/spark";
+        @namespace mx "library://ns.adobe.com/flex/mx";
+        
+        .publisherContainer {
+            borderColor:#ffffff;
+            borderStyle:inset;
+            borderAlpha:1;
+        }
+    </fx:Style> 
+    <fx:Script>
+        <![CDATA[
+            import packages.*;
+            import flash.events.NetStatusEvent;
+            import flash.external.*;
+            import flash.media.Microphone;
+            import flash.media.SoundMixer;
+            import flash.system.Security;
+            import mx.controls.*;
+            import mx.core.FlexGlobals;
+            import mx.core.UIComponent;    
+            
+            private var GLOBAL_MODE:String = null;
+            private var GLOBAL_URL:String = null;
+            private var GLOBAL_USERID:String = null;
+            private var GLOBAL_SESSIONID:String = null;
+            private var GLOBAL_OPTIONS:Array = null;    
+            
+            private var fc:FmsConnection = null; // the fms connection object
+            private var streamPublisherContainer:VideoDisplay;          
+            private var streamViewerContainer:UIComponent;      
+            
+            private var videoObject:Video;
+            
+            // streams
+            private var streamPublisher:NetStream;
+            private var streamViewer:NetStream;
+            
+            // cam vars
+            private var userCamera:UCamera = null;      
+            
+            // sound vars
+            private var toggleSound:Boolean = false;
+            private var userMicrophone:Microphone = Microphone.getEnhancedMicrophone();
+            private var userSound:SoundTransform;
+            
+            // controls
+            private var toolbar:VideoControls = new VideoControls();
+            
+            // text container for debug console
+            private var debugConsole:Text = new Text();         
+            
+            public var rcResponder:Responder = new Responder(onResult, onFault); // remote call responder
+            
+            /**
+             * Initialize application
+             * 
+             * @return void
+             */         
+            private function init():void
+            {       
+                Security.allowDomain("*");
+                
+                // Instantiate a ContextMenuItem
+                var customItem1:ContextMenuItem = new ContextMenuItem("version: " + Settings.VERSION);
+                var customItem2:ContextMenuItem = new ContextMenuItem("compiled: " + Settings.COMPILED_AT ); 
+                contextMenu.customItems.push(customItem1, customItem2);
+                
+                // set external interface methods
+                if (ExternalInterface.available){                   
+                    ExternalInterface.addCallback("connect", connect);
+                    ExternalInterface.addCallback("disconnect", disconnect);
+                    ExternalInterface.addCallback("isConnected", isConnected);
+                    ExternalInterface.addCallback("toggleMute", toggleMute);
+                }
+                
+                if (FlexGlobals.topLevelApplication.parameters.callback)
+                {
+                    Settings.JS_CALLBACK_METHOD = FlexGlobals.topLevelApplication.parameters.callback;
+                    ExternalInterface.call(Settings.JS_CALLBACK_METHOD);                 
+                }
+                
+                if (FlexGlobals.topLevelApplication.parameters.log)
+                {
+                    Settings.JS_LOG_METHOD = FlexGlobals.topLevelApplication.parameters.log;
+                    ExternalInterface.call(Settings.JS_LOG_METHOD, "ready", "Loading Application ..");           
+                }   
+            }
+            
+            /**
+             * Connect to the streaming server
+             * 
+             * @param String url the server host
+             * @param String userId future stream identifier (publish or play)
+             * @param String cSessionId client identifier
+             * @param Array options some options
+             * 
+             * @return void
+             */
+            public function connect(url:String, userId:String, sessionId:String, options:Array = null):void
+            {                   
+                GLOBAL_URL = url;
+                GLOBAL_SESSIONID = sessionId;
+                GLOBAL_USERID = userId;
+                GLOBAL_OPTIONS = options; // add the extra connection options
+                
+                fc = new FmsConnection(url, userId, sessionId, options);
+                
+                if (FlexGlobals.topLevelApplication.parameters.mode)
+                    run(FlexGlobals.topLevelApplication.parameters.mode, '');
+                else
+                    dispatchResponse("error", Settings.ERR_APPMODE_BLANK);
+            }
+            
+            private function reload():void
+            {
+                fc = new FmsConnection(GLOBAL_URL, GLOBAL_USERID, GLOBAL_SESSIONID, GLOBAL_OPTIONS);
+                if (GLOBAL_MODE == 'client'){
+                    fc.nc.removeEventListener(NetStatusEvent.NET_STATUS, viewStream);
+                    fc.nc.addEventListener(NetStatusEvent.NET_STATUS, viewStream);
+                }
+                if (GLOBAL_MODE == "performer")
+                {
+                    fc.nc.removeEventListener(NetStatusEvent.NET_STATUS, publishStream);
+                    fc.nc.addEventListener(NetStatusEvent.NET_STATUS, publishStream);                   
+                }
+                dispatchResponse("log", "[app reloaded]");
+            }
+            
+            /**
+             * Disconnect from the streaming server
+             * Return true if event raised is "NetConnection.Connect.Closed", false otherwise
+             * check http://help.adobe.com/en_US/FlashPlatform/reference/actionscript/3/flash/events/NetStatusEvent.html#info
+             * 
+             * @return Boolean
+             */         
+            public function disconnect():Boolean
+            {
+                fc.disconnect();
+                return !isConnected();
+            }
+            
+            /**
+             * Check if application is still connected to the streaming server
+             *  
+             * @return Boolean
+             */ 
+            public function isConnected():Boolean
+            {
+                if (fc.isConnected()){
+                    dispatchResponse("log", Settings.ST_CONNECTION_IS_CONNECTED);
+                    return true;
+                }
+                else {
+                    dispatchResponse("log", Settings.ST_CONNECTION_IS_DISCONNECTED);
+                    return false;
+                }                   
+            }   
+            
+            /**
+             * Configure app to manage stream play/publish 
+             * 
+             * @param String mode configure app according to the given mode
+             * @param String initiatorId who calls the configure
+             * 
+             * @return void
+             */
+            private function run(mode:String, initiatorId:String):Boolean
+            {
+                GLOBAL_MODE = mode;
+                
+                switch (GLOBAL_MODE){
+                    case 'performer':
+                    {
+                        streamPublisherContainer = new VideoDisplay;                                        
+                        streamPublisherContainer.right = 0;
+                        streamPublisherContainer.bottom = 0;
+                        streamPublisherContainer.percentWidth = 100;
+                        streamPublisherContainer.percentHeight = 100;
+                        streamPublisherContainer.minWidth = 1;
+                        streamPublisherContainer.minHeight = 1;
+                        streamPublisherContainer.alpha = 1;
+                        
+                        streamPublisherContainer.maintainAspectRatio = true;
+                        streamPublisherContainer.volume = 1;
+                        streamPublisherContainer.styleName = null;
+                        
+                        this.addElement(streamPublisherContainer); // put the video on stage
+                        
+                        userCamera = new UCamera; // initialize object
+                        userCamera.open();
+                        
+                        streamPublisherContainer.attachCamera(userCamera.getStream());              
+                        streamPublisherContainer.removeEventListener(MouseEvent.MOUSE_DOWN, mouseDownHandler);
+                        streamPublisherContainer.removeEventListener(MouseEvent.MOUSE_UP, mouseUpHandler);                      
+                        fc.nc.addEventListener(NetStatusEvent.NET_STATUS, publishStream);   //Listener to see if connection is successful                       
+                        
+                        break;
+                    }
+                        
+                    case 'client':
+                    {
+                        
+                        streamViewerContainer = new UIComponent;
+                        
+                        streamViewerContainer.left = 0;
+                        streamViewerContainer.top = 0;
+                        streamViewerContainer.percentWidth = 100;
+                        streamViewerContainer.percentHeight = 100;
+                        
+                        this.addElement(streamViewerContainer); // put the video on stage
+                        fc.nc.addEventListener(NetStatusEvent.NET_STATUS, viewStream);  //Listener to see if connection is successful
+                        
+                        break;
+                    } 
+                        
+                    default:
+                    {
+                        dispatchResponse("error", Settings.ERR_APPMODE_UNKNOWN);
+                        return false;
+                        break;
+                    }                   
+                }
+                
+                // add controls
+                toolbar.show();
+                return true;
+            }
+            /**
+             * Publish stream
+             * 
+             * @param NetStatusEvent event the event
+             * @param Boolean forcePublish ignore the event and try to push stream to the streaming server
+             * 
+             * @return void
+             */
+            private function publishStream(event:NetStatusEvent, ignoreEvent:Boolean = false):void
+            {
+                if (ignoreEvent || (event.info.code == "NetConnection.Connect.Success"))
+                {
+                    var h264Settings:H264VideoStreamSettings;
+                    h264Settings = new H264VideoStreamSettings();
+                    h264Settings.setProfileLevel(H264Profile.BASELINE, H264Level.LEVEL_3_2);
+                    h264Settings.setQuality(0, Settings.CAMERA_QUALITY);
+                    h264Settings.setMode(userCamera.cameraWidth, userCamera.cameraHeight, userCamera.cameraFps);
+                    
+                    streamPublisher = new NetStream(fc.nc);  //Initializing NetStream               
+                    streamPublisher.attachCamera(userCamera.getStream());
+                    
+                    try {
+                        streamPublisher.attachAudio(getMicStream()); //Attaching Camera & Microphone
+                    }
+                    catch (err:Error) {
+                        dispatchResponse("log", Settings.ERR_HARDWARE_MIC + err.message);
+                    }                           
+                    
+                    streamPublisher.videoStreamSettings = h264Settings;                 
+                    streamPublisher.publish("mp4:" + GLOBAL_USERID + ".mp4?sessionId=" + GLOBAL_SESSIONID + "&targetId=" + GLOBAL_USERID, "live"); //Publish stream"
+                    
+                    dispatchResponse("log", "Published @ " + "mp4:" + GLOBAL_USERID + ".mp4");      
+                    
+                }
+                else {
+                    if ((event.info.level == "status")) 
+                        dispatchResponse("log", "PublishMethod." + event.info.code);
+                    else
+                        dispatchResponse("error", "PublishMethod." + event.info.code);
+                    
+                    if ((event.info.code == "NetConnection.Connect.Closed") || (event.info.code == "NetConnection.Connect.Failed"))
+                        reload();                   
+                }
+            }       
+            
+            /**
+             * Play stream
+             * 
+             * @param NetStatusEvent event the event
+             * 
+             * @return void
+             */
+            private function viewStream(event:NetStatusEvent, ignoreEvent:Boolean = false):void
+            {
+                if (ignoreEvent || (event.info.code == "NetConnection.Connect.Success")){                   
+                    streamViewer = new NetStream(fc.nc);  //Initializing NetStream
+                    videoObject = new Video();
+                    videoObject.attachNetStream(streamViewer);
+                    initSound();
+                    
+                    streamViewer.play("mp4:" + GLOBAL_USERID + ".mp4?sessionId=" + GLOBAL_SESSIONID + "&targetId=" + GLOBAL_USERID);
+                    
+                    // scale to stream size
+                    streamViewerContainer.width = videoObject.width = FlexGlobals.topLevelApplication.width;
+                    streamViewerContainer.height = videoObject.height = FlexGlobals.topLevelApplication.height; 
+                    
+                    streamViewerContainer.addChild(videoObject);
+                }                   
+                
+                if (event) {   
+                    if ((event.info.level == "status")) 
+                        dispatchResponse("log", "ViewMethod." + event.info.code);
+                    else
+                        dispatchResponse("error", "ViewMethod." + event.info.code);
+                    
+                    if ((event.info.code == "NetConnection.Connect.Closed") || (event.info.code == "NetConnection.Connect.Failed"))
+                        reload();
+                }               
+            }           
+            
+            /**
+             * Makes application responsive
+             * 
+             * @return void
+             */
+            public function scaleVideoDisplay(width:Number = 0, height:Number = 0):void
+            {
+                if (width>0 && height>0){
+                    FlexGlobals.topLevelApplication.width = width;
+                    FlexGlobals.topLevelApplication.height = height;                
+                }
+                
+                try
+                {
+                    if (GLOBAL_MODE == "performer"){
+                        streamPublisherContainer.width = FlexGlobals.topLevelApplication.width;
+                        streamPublisherContainer.height = FlexGlobals.topLevelApplication.height;
+                        
+                    }
+                    else {
+                        streamViewerContainer.width = videoObject.width = FlexGlobals.topLevelApplication.width;
+                        streamViewerContainer.height = videoObject.height = FlexGlobals.topLevelApplication.height;                                         
+                    }           
+                } 
+                catch (err:Error) {
+                    
+                }
+            }   
+            
+            /**
+             * Init sound
+             * 
+             * @return void
+             */         
+            private function initSound():void
+            {
+                //init soundTransform
+                userSound = new SoundTransform();
+                userSound.volume = 1; // goes from 0 to 1
+                flash.media.SoundMixer.soundTransform = userSound;              
+                
+                //by default sound is on
+                toggleSound = true;
+            }
+            
+            /**
+             * Toggle sound on/off
+             * 
+             * @return Boolean true is sound is on, false if off 
+             */
+            public function toggleMute():Boolean
+            {       
+                if (!toggleSound) {
+                    userSound.volume = 1; // goes from 0 to 1
+                    toggleSound = true;
+                }
+                else{
+                    userSound.volume = 0; // goes from 0 to 1
+                    toggleSound = false;
+                }       
+                
+                flash.media.SoundMixer.soundTransform = userSound;                      
+                return toggleSound;
+            }
+            
+            private function getMicStream():Microphone
+            {       
+                // using the default NellyMoser codec
+                userMicrophone.gain = 60; // default 50 
+                userMicrophone.rate = 44; // default 8 or any available > 8
+                
+                var options:MicrophoneEnhancedOptions = new MicrophoneEnhancedOptions();
+                options.mode = MicrophoneEnhancedMode.FULL_DUPLEX;
+                userMicrophone.enhancedOptions = options;               
+                userMicrophone.setLoopBack(false); // default true 
+                userMicrophone.setSilenceLevel(0); 
+                
+                return userMicrophone;      
+            }           
+            
+            /**
+             * Log data to external js
+             * 
+             * @param String dispatchEvent is the event/category type of the message
+             * @param String message
+             * 
+             * @return void
+             */
+            private function dispatchResponse(dispatchEvent:String, message:String):void
+            {
+                ExternalInterface.call(Settings.JS_LOG_METHOD, dispatchEvent, message);
+            }               
+            
+            private function mouseDownHandler(event:MouseEvent):void {
+                var object:Object = event.target;
+                // we should limit dragging to the area inside the canvas
+                object.startDrag();
+            }
+            
+            private function mouseUpHandler(event:MouseEvent):void {
+                var object:Object = event.target;
+                object.stopDrag();
+            }   
+            
+            private function NetStreamEventHandler(event:NetStatusEvent):void{};                        
+            private function onResult(response:Object):void{};              
+            private function onFault(response:Object):void{};           
+            
+        ]]>
+    </fx:Script>
 </s:Application>
